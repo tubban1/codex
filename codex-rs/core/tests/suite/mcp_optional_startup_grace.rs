@@ -3,6 +3,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use codex_core::TurnInputRequest;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::user_input::UserInput;
+use core_test_support::wait_for_event;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -302,6 +306,94 @@ async fn running_thread_uses_refreshed_optional_mcp_startup_grace(
         .is_some(),
         "the refreshed optional MCP startup grace should expose the ready tool"
     );
+
+    fixture.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+/// A short grace must be reported to the client as a *turn-scoped* omission,
+/// rather than suggesting that the configured MCP server is missing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn optional_mcp_grace_omission_emits_turn_warning() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let responses_server = responses::start_mock_server().await;
+    let mcp_server = responses::start_mock_server().await;
+    let (http_server, startup_control) =
+        AppsTestServer::mount_with_startup_control(&mcp_server).await?;
+    let release_startup = startup_control.hold_next_successful_initialize();
+    let server_url = format!("{}/api/codex/ps/mcp", http_server.chatgpt_base_url);
+    let _response = responses::mount_sse_once(
+        &responses_server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-grace-warning"),
+            responses::ev_assistant_message("msg-grace-warning", "done"),
+            responses::ev_completed("resp-grace-warning"),
+        ]),
+    )
+    .await;
+
+    let fixture = test_codex()
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .with_config(move |config| {
+            config.mcp_optional_startup_grace = Duration::from_millis(50);
+            let mut servers = config.mcp_servers.get().clone();
+            servers.insert(
+                SERVER_NAME.to_string(),
+                serde_json::from_value(json!({
+                    "url": server_url,
+                    "http_headers": { "Authorization": "Bearer synthetic-test-token" },
+                    "enabled_tools": [TOOL_NAME],
+                    "startup_timeout_sec": PENDING_SERVER_TIMEOUT.as_secs(),
+                }))
+                .expect("synthetic optional MCP server config"),
+            );
+            config.mcp_servers.set(servers).expect("valid MCP servers");
+        })
+        .build_with_auto_env(&responses_server)
+        .await?;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while startup_control.initialize_attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("optional MCP initialization must begin")?;
+
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "show optional MCP tools".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let warning_event = tokio::time::timeout(
+        TURN_TIMEOUT,
+        wait_for_event(&fixture.codex, |event| {
+            matches!(event, EventMsg::Warning(warning) if warning.message.contains("MCP servers still starting:"))
+        }),
+    )
+    .await
+    .context("turn must report the omitted startup server")?;
+    let EventMsg::Warning(warning) = warning_event else {
+        panic!("expected MCP startup omission warning");
+    };
+    assert!(warning.message.contains(SERVER_NAME));
+    assert!(warning.message.contains("Retry after startup completes"));
+
+    release_startup
+        .send(())
+        .expect("synthetic MCP startup should remain pending");
+    tokio::time::timeout(
+        TURN_TIMEOUT,
+        wait_for_event(&fixture.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await
+    .context("turn should finish after reporting the omission")?;
 
     fixture.codex.shutdown_and_wait().await?;
     Ok(())

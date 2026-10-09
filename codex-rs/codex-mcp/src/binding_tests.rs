@@ -148,6 +148,7 @@ async fn test_step(
             /*plugins_available*/ false,
             vec![tool],
             calls,
+            Vec::new(),
         )),
         client,
         tool_catalog,

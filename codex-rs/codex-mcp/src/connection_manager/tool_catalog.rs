@@ -313,7 +313,7 @@ impl McpConnectionSet {
                     || (server_name == CODEX_APPS_MCP_SERVER_NAME && !has_cached_tools);
                 if !must_wait_for_startup && has_cached_tools {
                     trace!(server_name = %server_name, "using cached MCP catalog without waiting for startup");
-                    return (server_name, view, cached_tools);
+                    return (server_name, view, cached_tools, false);
                 }
                 if !must_wait_for_startup && optional_mcp_startup_grace.is_zero() {
                     if let Some(cache) = view.connection.client.tool_catalog_cache_context.as_ref()
@@ -344,21 +344,33 @@ impl McpConnectionSet {
                             )
                         })
                         .unwrap_or(optional_startup_deadline);
-                    if tokio::time::timeout_at(startup_deadline, view.connection.client())
-                        .await
-                        .is_err()
-                    {
+                    let timed_out = tokio::time::timeout_at(
+                        startup_deadline,
+                        view.connection.client(),
+                    )
+                    .await
+                    .is_err();
+                    if timed_out {
                         trace!(server_name = %server_name, "omitting pending optional MCP server");
                     }
-                    return (server_name, view, cached_tools);
+                    return (server_name, view, cached_tools, timed_out);
                 }
                 let _ = view.connection.client().await;
-                return (server_name, view, cached_tools);
+                return (server_name, view, cached_tools, false);
             }
-            (server_name, view, None)
+            (server_name, view, None, false)
         }))
         .await;
-        let server_results = join_all(server_snapshots.into_iter().map(|(server_name, view, cached_tools)| async move {
+        let omitted_startup_servers = server_snapshots
+            .iter()
+            .filter_map(|(server_name, view, cached_tools, timed_out)| {
+                (*timed_out
+                    && cached_tools.is_none()
+                    && !view.connection.client.startup_complete.load(Ordering::Acquire))
+                .then(|| (*server_name).clone())
+            })
+            .collect::<Vec<_>>();
+        let server_results = join_all(server_snapshots.into_iter().map(|(server_name, view, cached_tools, _)| async move {
             let startup_pending = !view
                 .connection
                 .client
@@ -530,6 +542,7 @@ impl McpConnectionSet {
             plugins_available,
             tools,
             calls,
+            omitted_startup_servers,
         )
     }
 

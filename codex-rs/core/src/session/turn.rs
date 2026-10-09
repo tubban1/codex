@@ -279,6 +279,26 @@ pub(crate) async fn run_turn(
         }
         Err(err) => return Err(err),
     };
+    // A completed MCP status probe does not mean the tools were available to
+    // this model turn. Report servers omitted by the actual captured binding.
+    let omitted = first_step_context.mcp.omitted_startup_servers();
+    if !omitted.is_empty() {
+        sess.send_event(
+            &turn_context,
+            EventMsg::Warning(WarningEvent {
+                message: format!(
+                    concat!(
+                        "MCP servers still starting: {}. ",
+                        "Their tools were unavailable at the start of this turn. ",
+                        "Retry after startup completes."
+                    ),
+                    omitted.join(", ")
+                ),
+            }),
+        )
+        .await;
+    }
+
     // Record initial context while preparing diff display roots.
     let (record_context, display_roots) = tokio::join!(
         sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),

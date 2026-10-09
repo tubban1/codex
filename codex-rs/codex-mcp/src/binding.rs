@@ -37,6 +37,7 @@ pub struct McpBinding {
     plugins_available: bool,
     tools: Arc<[ToolInfo]>,
     calls: HashMap<(String, String), PreparedMcpCall>,
+    omitted_startup_servers: Vec<String>,
 }
 
 impl McpBinding {
@@ -49,6 +50,7 @@ impl McpBinding {
             /*plugins_available*/ false,
             Vec::new(),
             HashMap::new(),
+            Vec::new(),
         )
     }
 
@@ -59,6 +61,7 @@ impl McpBinding {
         plugins_available: bool,
         tools: impl Into<Arc<[ToolInfo]>>,
         calls: HashMap<(String, String), PreparedMcpCall>,
+        omitted_startup_servers: Vec<String>,
     ) -> Self {
         Self {
             connections,
@@ -67,6 +70,7 @@ impl McpBinding {
             plugins_available,
             tools: tools.into(),
             calls,
+            omitted_startup_servers,
         }
     }
 
@@ -76,6 +80,11 @@ impl McpBinding {
 
     pub fn plugins_available(&self) -> bool {
         self.plugins_available
+    }
+
+    /// Optional MCP servers excluded from this model step because their startup grace expired.
+    pub fn omitted_startup_servers(&self) -> &[String] {
+        &self.omitted_startup_servers
     }
 
     /// Returns the frozen model-visible catalog captured for this binding.
